@@ -10,9 +10,14 @@ import urllib.request
 from urllib.parse import parse_qs, urlparse
 
 from database import initialize_database, login_or_create_player, login_or_create_oauth_player
-
+from saltsolver import (
+    render_salt_solver_new_game_page,
+    render_salt_solver_page,
+    render_salt_solver_tutorial_page,
+)
 
 OAUTH_STATES = set()
+PLAYER_SESSIONS = {}
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -50,6 +55,20 @@ class MobileServerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html_content.encode("utf-8"))
 
+    def send_file_response(self, file_path, content_type):
+        try:
+            with open(file_path, "rb") as file:
+                file_content = file.read()
+        except FileNotFoundError:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(file_content)
+
     def redirect(self, location):
         self.send_response(302)
         self.send_header("Location", location)
@@ -58,12 +77,29 @@ class MobileServerHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urlparse(self.path)
 
+        if parsed_url.path.startswith("/images/") and parsed_url.path.endswith(".png"):
+            image_name = os.path.basename(parsed_url.path)
+            self.send_file_response(f"images/{image_name}", "image/png")
+            return
+
         if parsed_url.path == "/oauth/google/start":
             self.start_google_oauth()
             return
 
         if parsed_url.path == "/oauth/google/callback":
             self.handle_google_oauth_callback(parsed_url)
+            return
+
+        if parsed_url.path == "/salt-solver":
+            self.show_salt_solver(parsed_url)
+            return
+
+        if parsed_url.path == "/salt-solver/new-game":
+            self.show_salt_solver_new_game(parsed_url)
+            return
+
+        if parsed_url.path == "/salt-solver/tutorial":
+            self.show_salt_solver_tutorial(parsed_url)
             return
 
         self.send_html_response(render_login_page())
@@ -88,12 +124,60 @@ class MobileServerHandler(BaseHTTPRequestHandler):
             self.send_html_response(render_login_page(result["message"]))
             return
 
+        session_token = create_player_session(result["player"])
+
         self.send_html_response(
             render_player_stats_page(
                 player=result["player"],
                 message=result["message"],
                 created=result["created"],
+                session_token=session_token,
             )
+        )
+
+    def show_salt_solver(self, parsed_url):
+        query_parameters = parse_qs(parsed_url.query)
+        session_token = query_parameters.get("token", [""])[0]
+        player = PLAYER_SESSIONS.get(session_token)
+
+        if player is None:
+            self.send_html_response(
+                render_login_page("Please log in before playing Salt Solver.")
+            )
+            return
+
+        self.send_html_response(
+            render_salt_solver_page(player, render_page, session_token)
+        )
+
+    def show_salt_solver_new_game(self, parsed_url):
+        query_parameters = parse_qs(parsed_url.query)
+        session_token = query_parameters.get("token", [""])[0]
+        player = PLAYER_SESSIONS.get(session_token)
+
+        if player is None:
+            self.send_html_response(
+                render_login_page("Please log in before playing Salt Solver.")
+            )
+            return
+
+        self.send_html_response(
+            render_salt_solver_new_game_page(player, render_page, session_token)
+        )
+
+    def show_salt_solver_tutorial(self, parsed_url):
+        query_parameters = parse_qs(parsed_url.query)
+        session_token = query_parameters.get("token", [""])[0]
+        player = PLAYER_SESSIONS.get(session_token)
+
+        if player is None:
+            self.send_html_response(
+                render_login_page("Please log in before playing Salt Solver.")
+            )
+            return
+
+        self.send_html_response(
+            render_salt_solver_tutorial_page(player, render_page, session_token)
         )
 
     def start_google_oauth(self):
@@ -183,11 +267,14 @@ class MobileServerHandler(BaseHTTPRequestHandler):
                 self.send_html_response(render_login_page(result["message"]))
                 return
 
+            session_token = create_player_session(result["player"])
+
             self.send_html_response(
                 render_player_stats_page(
                     player=result["player"],
                     message=result["message"],
                     created=result["created"],
+                    session_token=session_token,
                 )
             )
         except RuntimeError as error:
@@ -333,13 +420,24 @@ def render_login_page(error_message=None):
     return render_page("Player Login", body)
 
 
-def render_player_stats_page(player, message, created):
+def create_player_session(player):
+    session_token = secrets.token_urlsafe(32)
+    PLAYER_SESSIONS[session_token] = player
+    return session_token
+
+
+def render_player_stats_page(player, message, created, session_token):
     metadata_json = json.dumps(player["metadata"], indent=4)
     message_class = "success"
+    salt_solver_url = f"/salt-solver?token={urllib.parse.quote(session_token)}"
 
     body = f"""
     <h1>{html.escape(player["name"])}'s Stats</h1>
     <div class="{message_class}">{html.escape(message)}</div>
+
+    <a class="oauth-button" href="{salt_solver_url}">
+        Play Salt Solver
+    </a>
 
     <h2>Account</h2>
     <p><strong>Username:</strong> {html.escape(player["username"])}</p>
